@@ -53,7 +53,7 @@ mod_export Eprog siglists[VSIGCOUNT];
 /* Total count of trapped signals */
 
 /**/
-mod_export int nsigtrapped;
+mod_export volatile int nsigtrapped;
 
 /* Running an exit trap? */
 
@@ -72,20 +72,20 @@ static int exit_trap_posix;
 /* Variables used by signal queueing */
 
 /**/
-mod_export int queueing_enabled, queue_front, queue_rear;
+mod_export volatile int queueing_enabled, queue_front, queue_rear;
 /**/
 mod_export int signal_queue[MAX_QUEUE_SIZE];
 /**/
 mod_export sigset_t signal_mask_queue[MAX_QUEUE_SIZE];
 #ifdef DEBUG
 /**/
-mod_export int queue_in;
+mod_export volatile int queue_in;
 #endif
 
 /* Variables used by trap queueing */
 
 /**/
-mod_export int trap_queueing_enabled, trap_queue_front, trap_queue_rear;
+mod_export volatile int trap_queueing_enabled, trap_queue_front, trap_queue_rear;
 /**/
 mod_export int trap_queue[MAX_QUEUE_SIZE];
 
@@ -539,9 +539,10 @@ wait_for_processes(void)
 #endif
 		if (WIFEXITED(status) &&
 		    pn->pid == jn->gleader &&
-		    killpg(pn->pid, 0) == -1) {
-		    jn->gleader = 0;
-		    if (!(jn->stat & STAT_NOSTTY)) {
+		    killpg(pn->pid, 0) == -1  &&
+		    errno == ESRCH) {
+		    if (last_attached_pgrp == jn->gleader &&
+			!(jn->stat & STAT_NOSTTY)) {
 			/*
 			 * This PID was in control of the terminal;
 			 * reclaim terminal now it has exited.
@@ -550,7 +551,9 @@ wait_for_processes(void)
 			 * leader, however.
 			 */
 			attachtty(mypgrp);
+			adjustwinsize(0);
 		    }
+		    jn->gleader = 0;
 		}
 	    }
 	    update_job(jn);
@@ -652,7 +655,7 @@ zhandler(int sig)
 		_exit(SIGPIPE);
 	    else if (!isatty(SHTTY)) {
 		stopmsg = 1;
-		zexit(SIGPIPE, 1);
+		zexit(SIGPIPE, ZEXIT_SIGNAL);
 	    }
 	}
 	break;
@@ -660,7 +663,7 @@ zhandler(int sig)
     case SIGHUP:
         if (!handletrap(SIGHUP)) {
             stopmsg = 1;
-            zexit(SIGHUP, 1);
+            zexit(SIGHUP, ZEXIT_SIGNAL);
         }
         break;
  
@@ -668,10 +671,10 @@ zhandler(int sig)
         if (!handletrap(SIGINT)) {
 	    if ((isset(PRIVILEGED) || isset(RESTRICTED)) &&
 		isset(INTERACTIVE) && (noerrexit & NOERREXIT_SIGNAL))
-		zexit(SIGINT, 1);
+		zexit(SIGINT, ZEXIT_SIGNAL);
+            errflag |= ERRFLAG_INT;
             if (list_pipe || chline || simple_pline) {
                 breaks = loops;
-                errflag |= ERRFLAG_INT;
 		inerrflush();
 		check_cursh_sig(SIGINT);
             }
@@ -701,7 +704,7 @@ zhandler(int sig)
 		errflag = noerrs = 0;
 		zwarn("timeout");
 		stopmsg = 1;
-		zexit(SIGALRM, 1);
+		zexit(SIGALRM, ZEXIT_SIGNAL);
 	    }
         }
         break;
@@ -780,7 +783,20 @@ killjb(Job jn, int sig)
 		    if (kill(pn->pid, sig) == -1 && errno != ESRCH)
 			err = -1;
 
-                return err;
+		/*
+		 * The following marks both the superjob and subjob
+		 * as running, as done elsewhere.
+		 *
+		 * It's not entirely clear to me what the right way
+		 * to flag the status of a still-pausd final process,
+		 * as handled above, but we should be cnsistent about
+		 * this inside makerunning() rather than doing anything
+		 * special here.
+		 */
+		if (err != -1)
+		    makerunning(jn);
+
+		return err;
             }
             if (killpg(jobtab[jn->other].gleader, sig) == -1 && errno != ESRCH)
 		err = -1;
@@ -790,8 +806,12 @@ killjb(Job jn, int sig)
 
 	    return err;
         }
-        else
-	    return killpg(jn->gleader, sig);
+        else {
+	    err = killpg(jn->gleader, sig);
+	    if (sig == SIGCONT && err != -1)
+		makerunning(jn);
+	    return err;
+	}
     }
     for (pn = jn->procs; pn; pn = pn->next) {
 	/*
@@ -993,10 +1013,6 @@ removetrap(int sig)
 	(!trapped || locallevel > (sigtrapped[sig] >> ZSIG_SHIFT)))
 	dosavetrap(sig, locallevel);
 
-    if (!trapped) {
-	unqueue_signals();
-        return NULL;
-    }
     if (sigtrapped[sig] & ZSIG_TRAPPED)
 	nsigtrapped--;
     sigtrapped[sig] = 0;
@@ -1251,19 +1267,19 @@ unqueue_traps(void)
 
 /* Are we already executing a trap? */
 /**/
-int intrap;
+volatile int intrap;
 
 /* Is the current trap a function? */
 
 /**/
-int trapisfunc;
+volatile int trapisfunc;
 
 /*
  * If the current trap is not a function, at what function depth
  * did the trap get called?
  */
 /**/
-int traplocallevel;
+volatile int traplocallevel;
 
 /*
  * sig is the signal number.

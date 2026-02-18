@@ -1,0 +1,9 @@
+# Stub Makefile for module-only build (no doc sources needed)
+@DEFS_MK@
+all:
+install:
+uninstall:
+clean:
+distclean:
+realclean:
+mostlyclean:

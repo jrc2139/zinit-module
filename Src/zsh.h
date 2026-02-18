@@ -455,7 +455,7 @@ enum {
  */
 #define FDT_FLOCK_EXEC		6
 /*
- * Entry used by a process substition.
+ * Entry used by a process substitution.
  * This marker is not tested internally as we associated the file
  * descriptor with a job for closing.
  *
@@ -503,6 +503,14 @@ enum {
     ZCONTEXT_LEX        = (1<<1),
     /* Parser */
     ZCONTEXT_PARSE      = (1<<2)
+};
+
+/* Report from entersubsh() to pass subshell info to addproc */
+struct entersubsh_ret {
+    /* Process group leader chosen by subshell, else -1 */
+    int gleader;
+    /* list_pipe_job setting used by subshell, else -1 */
+    int list_pipe_job;
 };
 
 /**************************/
@@ -824,22 +832,59 @@ struct estate {
     char *strs;			/* strings from prog */
 };
 
+/* 
+ * A binary tree of strings.
+ *
+ * Refer to the "Word code." comment at the top of Src/parse.c for details.
+ */
 typedef struct eccstr *Eccstr;
-
 struct eccstr {
+    /* Child pointers. */
     Eccstr left, right;
+
+    /* String; pointer into to estate::strs. */
     char *str;
-    wordcode offs, aoffs;
+
+    /* Wordcode of a long string, as described in the Src/parse.c comment. */
+    wordcode offs;
+
+    /* Raw memory offset of str in estate::strs. */
+    wordcode aoffs;
+
+    /* 
+     * ### The number of starts and ends of function definitions up to this point.
+     *
+     * String reuse may only happen between strings that have the same "nfunc" value.
+     */
     int nfunc;
+
+    /* Hash of str. */
     int hashval;
 };
 
-#define EC_NODUP  0
-#define EC_DUP    1
-#define EC_DUPTOK 2
+/*
+ * Values for the "dup" parameter to ecgetstr().
+ */
+enum ec_dup_t {
+    /* 
+     * Make no promises about how the return value is allocated, except that
+     * the caller does not need to explicitly free it.  It might be heap allocated,
+     * a static string, or anything in between.
+     */
+    EC_NODUP = 0,
 
+    /* Allocate the return value from the heap. */
+    EC_DUP = 1,
+
+    /* 
+     * If the string contains tokens (as indicated by the least significant bit
+     * of the wordcode), behave as EC_DUP; otherwise, as EC_NODUP.
+     */
+    EC_DUPTOK = 2
+};
+
+/* See comment at the top of Src/parse.c for details. */
 #define WC_CODEBITS 5
-
 #define wc_code(C)   ((C) & ((wordcode) ((1 << WC_CODEBITS) - 1)))
 #define wc_data(C)   ((C) >> WC_CODEBITS)
 #define wc_bdata(D)  ((D) << WC_CODEBITS)
@@ -868,7 +913,11 @@ struct eccstr {
 #define WC_AUTOFN  20
 #define WC_TRY     21
 
-/* increment as necessary */
+/* 
+ * Increment as necessary.
+ * 
+ * If this exceeds 31, increment WC_CODEBITS.
+ */
 #define WC_COUNT   22
 
 #define WCB_END()           wc_bld(WC_END, 0)
@@ -1148,7 +1197,10 @@ typedef void     (*ScanTabFunc)    _((HashTable, ScanFunc, int));
 
 typedef void (*PrintTableStats) _((HashTable));
 
-/* hash table for standard open hashing */
+/* Hash table for standard open hashing. Instances of struct hashtable can be *
+ * created only by newhashtable(). In fact, this function creates an instance *
+ * of struct hashtableimpl, which is made of struct hashtable (public part)   *
+ * and additional data members that are only accessible from hashtable.c.     */
 
 struct hashtable {
     /* HASHTABLE DATA */
@@ -1172,10 +1224,6 @@ struct hashtable {
     FreeNodeFunc freenode;	/* pointer to function to free a node         */
     ScanFunc printnode;		/* pointer to function to print a node        */
     ScanTabFunc scantab;	/* pointer to function to scan table          */
-
-#ifdef HASHTABLE_INTERNAL_MEMBERS
-    HASHTABLE_INTERNAL_MEMBERS	/* internal use in hashtable.c                */
-#endif
 };
 
 /* generic hash table node */
@@ -1246,8 +1294,8 @@ enum {
 
 /*
  * Assignment has value?
- * If the assignment is an arrray, then it certainly has a value --- we
- * can only tell if there's an expicit assignment.
+ * If the assignment is an array, then it certainly has a value --- we
+ * can only tell if there's an explicit assignment.
  */
 
 #define ASG_VALUEP(asg) (ASG_ARRAYP(asg) ||			\
@@ -1400,7 +1448,7 @@ struct builtin {
     int minargs;		/* minimum number of arguments                        */
     int maxargs;		/* maximum number of arguments, or -1 for no limit    */
     int funcid;			/* xbins (see above) for overloaded handlerfuncs      */
-    char *optstr;		/* string of legal options                            */
+    char *optstr;		/* string of legal options (see execbuiltin())        */
     char *defopts;		/* options set by default for overloaded handlerfuncs */
 };
 
@@ -1436,8 +1484,8 @@ struct builtin {
   */
 #define BINF_HANDLES_OPTS	(1<<18)
 /*
- * Handles the assignement interface.  The argv list actually contains
- * two nested litsts, the first of normal arguments, and the second of
+ * Handles the assignment interface.  The argv list actually contains
+ * two nested lists, the first of normal arguments, and the second of
  * assignment structures.
  */
 #define BINF_ASSIGN		(1<<19)
@@ -1859,7 +1907,7 @@ struct tieddata {
 /* The following are the same since they *
  * both represent -U option to typeset   */
 #define PM_UNIQUE	(1<<13)	/* remove duplicates                        */
-#define PM_UNALIASED	(1<<13)	/* do not expand aliases when autoloading   */
+#define PM_UNALIASED	(1<<13)	/* (function) do not expand aliases when autoloading   */
 
 #define PM_HIDE		(1<<14)	/* Special behaviour hidden by local        */
 #define PM_CUR_FPATH    (1<<14) /* (function): can use $fpath with filename */
@@ -1868,28 +1916,32 @@ struct tieddata {
 #define PM_TIED 	(1<<16)	/* array tied to colon-path or v.v.         */
 #define PM_TAGGED_LOCAL (1<<16) /* (function): non-recursive PM_TAGGED      */
 
-#define PM_KSHSTORED	(1<<17) /* function stored in ksh form              */
-#define PM_ZSHSTORED	(1<<18) /* function stored in zsh form              */
-
 /* Remaining flags do not correspond directly to command line arguments */
-#define PM_DONTIMPORT_SUID (1<<19) /* do not import if running setuid */
-#define PM_LOADDIR      (1<<19) /* (function) filename gives load directory */
-#define PM_SINGLE       (1<<20) /* special can only have a single instance  */
-#define PM_ANONYMOUS    (1<<20) /* (function) anonymous function            */
-#define PM_LOCAL	(1<<21) /* this parameter will be made local        */
-#define PM_SPECIAL	(1<<22) /* special builtin parameter                */
-#define PM_DONTIMPORT	(1<<23)	/* do not import this variable              */
-#define PM_RESTRICTED	(1<<24) /* cannot be changed in restricted mode     */
-#define PM_UNSET	(1<<25)	/* has null value                           */
-#define PM_REMOVABLE	(1<<26)	/* special can be removed from paramtab     */
-#define PM_AUTOLOAD	(1<<27) /* autoloaded from module                   */
-#define PM_NORESTORE	(1<<28)	/* do not restore value of local special    */
-#define PM_AUTOALL	(1<<28) /* autoload all features in module
+#define PM_DONTIMPORT_SUID (1<<17) /* do not import if running setuid */
+#define PM_LOADDIR      (1<<17) /* (function) filename gives load directory */
+#define PM_SINGLE       (1<<18) /* special can only have a single instance  */
+#define PM_ANONYMOUS    (1<<18) /* (function) anonymous function            */
+#define PM_LOCAL	(1<<19) /* this parameter will be made local        */
+#define PM_KSHSTORED	(1<<19) /* (function) stored in ksh form              */
+#define PM_SPECIAL	(1<<20) /* special builtin parameter                */
+#define PM_ZSHSTORED	(1<<20) /* (function) stored in zsh form              */
+#define PM_RO_BY_DESIGN (1<<21) /* to distinguish from specials that can be
+				   made read-only by the user               */
+#define PM_READONLY_SPECIAL (PM_SPECIAL|PM_READONLY|PM_RO_BY_DESIGN)
+#define PM_DONTIMPORT	(1<<22)	/* do not import this variable              */
+#define PM_DECLARED	(1<<22) /* explicitly named with typeset            */
+#define PM_RESTRICTED	(1<<23) /* cannot be changed in restricted mode     */
+#define PM_UNSET	(1<<24)	/* has null value                           */
+#define PM_DEFAULTED	(PM_DECLARED|PM_UNSET)
+#define PM_REMOVABLE	(1<<25)	/* special can be removed from paramtab     */
+#define PM_AUTOLOAD	(1<<26) /* autoloaded from module                   */
+#define PM_NORESTORE	(1<<27)	/* do not restore value of local special    */
+#define PM_AUTOALL	(1<<27) /* autoload all features in module
 				 * when loading: valid only if PM_AUTOLOAD
 				 * is also present.
 				 */
-#define PM_HASHELEM     (1<<29) /* is a hash-element */
-#define PM_NAMEDDIR     (1<<30) /* has a corresponding nameddirtab entry    */
+#define PM_HASHELEM     (1<<28) /* is a hash-element */
+#define PM_NAMEDDIR     (1<<29) /* has a corresponding nameddirtab entry    */
 
 /* The option string corresponds to the first of the variables above */
 #define TYPESET_OPTSTR "aiEFALRZlurtxUhHTkz"
@@ -1941,6 +1993,7 @@ struct tieddata {
 #define SUB_START	0x1000  /* force match at start with SUB_END
 				 * and no SUB_SUBSTR */
 #define SUB_LIST	0x2000  /* no substitution, return list of matches */
+#define SUB_EGLOB	0x4000	/* use extended globbing in patterns */
 
 /*
  * Structure recording multiple matches inside a test string.
@@ -1996,7 +2049,7 @@ enum {
 enum {
     /*
      * Set if the string had whitespace at the start
-     * that should cause word splitting against any preceeding string.
+     * that should cause word splitting against any preceding string.
      */
     MULTSUB_WS_AT_START = 1,
     /*
@@ -2130,6 +2183,8 @@ typedef groupset *Groupset;
 #define PRINT_INCLUDEVALUE	(1<<4)
 #define PRINT_TYPESET		(1<<5)
 #define PRINT_LINE	        (1<<6)
+#define PRINT_POSIX_EXPORT	(1<<7)
+#define PRINT_POSIX_READONLY	(1<<8)
 
 /* flags for printing for the whence builtin */
 #define PRINT_WHENCE_CSH	(1<<7)
@@ -2260,9 +2315,9 @@ struct histent {
  */
 #define LEXFLAGS_NEWLINE	0x0010
 
-/******************************************/
-/* Definitions for programable completion */
-/******************************************/
+/*******************************************/
+/* Definitions for programmable completion */
+/*******************************************/
 
 /* Nothing special. */
 #define IN_NOTHING 0
@@ -2334,13 +2389,16 @@ enum {
     BSDECHO,
     CASEGLOB,
     CASEMATCH,
+    CASEPATHS,
     CBASES,
     CDABLEVARS,
+    CDSILENT,
     CHASEDOTS,
     CHASELINKS,
     CHECKJOBS,
     CHECKRUNNINGJOBS,
     CLOBBER,
+    CLOBBEREMPTY,
     APPENDCREATE,
     COMBININGCHARS,
     COMPLETEALIASES,
@@ -2471,6 +2529,7 @@ enum {
     SHNULLCMD,
     SHOPTIONLETTERS,
     SHORTLOOPS,
+    SHORTREPEAT,
     SHWORDSPLIT,
     SINGLECOMMAND,
     SINGLELINEZLE,
@@ -2479,6 +2538,7 @@ enum {
     TRANSIENTRPROMPT,
     TRAPSASYNC,
     TYPESETSILENT,
+    TYPESETTOUNSET,
     UNSET,
     VERBOSE,
     VIMODE,
@@ -2621,6 +2681,12 @@ struct ttyinfo {
  * Text attributes for displaying in ZLE
  */
 
+#ifdef HAVE_STDINT_H
+  typedef uint64_t zattr;
+#else
+  typedef zulong zattr;
+#endif
+
 #define TXTBOLDFACE   0x0001
 #define TXTSTANDOUT   0x0002
 #define TXTUNDERLINE  0x0004
@@ -2652,32 +2718,35 @@ struct ttyinfo {
  */
 #define TXT_MULTIWORD_MASK  0x0400
 
-/* Mask for colour to use in foreground */
-#define TXT_ATTR_FG_COL_MASK     0x000FF000
-/* Bits to shift the foreground colour */
-#define TXT_ATTR_FG_COL_SHIFT    (12)
-/* Mask for colour to use in background */
-#define TXT_ATTR_BG_COL_MASK     0x0FF00000
-/* Bits to shift the background colour */
-#define TXT_ATTR_BG_COL_SHIFT    (20)
+/* used when, e.g an invalid colour is specified */
+#define TXT_ERROR 0x0800
 
-/* Flag to use termcap AF sequence to set colour, if available */
-#define TXT_ATTR_FG_TERMCAP      0x10000000
-/* Flag to use termcap AB sequence to set colour, if available */
-#define TXT_ATTR_BG_TERMCAP      0x20000000
+/* Mask for colour to use in foreground */
+#define TXT_ATTR_FG_COL_MASK     0x000000FFFFFF0000
+/* Bits to shift the foreground colour */
+#define TXT_ATTR_FG_COL_SHIFT    (16)
+/* Mask for colour to use in background */
+#define TXT_ATTR_BG_COL_MASK     0xFFFFFF0000000000
+/* Bits to shift the background colour */
+#define TXT_ATTR_BG_COL_SHIFT    (40)
+
+/* Flag to indicate that foreground is a 24-bit colour */
+#define TXT_ATTR_FG_24BIT        0x4000
+/* Flag to indicate that background is a 24-bit colour */
+#define TXT_ATTR_BG_24BIT        0x8000
 
 /* Things to turn on, including values for the colour elements */
 #define TXT_ATTR_ON_VALUES_MASK	\
     (TXT_ATTR_ON_MASK|TXT_ATTR_FG_COL_MASK|TXT_ATTR_BG_COL_MASK|\
-     TXT_ATTR_FG_TERMCAP|TXT_ATTR_BG_TERMCAP)
+     TXT_ATTR_FG_24BIT|TXT_ATTR_BG_24BIT)
 
 /* Mask out everything to do with setting a foreground colour */
 #define TXT_ATTR_FG_ON_MASK \
-    (TXTFGCOLOUR|TXT_ATTR_FG_COL_MASK|TXT_ATTR_FG_TERMCAP)
+    (TXTFGCOLOUR|TXT_ATTR_FG_COL_MASK|TXT_ATTR_FG_24BIT)
 
 /* Mask out everything to do with setting a background colour */
 #define TXT_ATTR_BG_ON_MASK \
-    (TXTBGCOLOUR|TXT_ATTR_BG_COL_MASK|TXT_ATTR_BG_TERMCAP)
+    (TXTBGCOLOUR|TXT_ATTR_BG_COL_MASK|TXT_ATTR_BG_24BIT)
 
 /* Mask out everything to do with activating colours */
 #define TXT_ATTR_COLOUR_ON_MASK			\
@@ -2694,6 +2763,12 @@ struct ttyinfo {
 #define COL_SEQ_FG	(0)
 #define COL_SEQ_BG	(1)
 #define COL_SEQ_COUNT	(2)
+
+struct color_rgb {
+    unsigned int red, green, blue;
+};
+
+typedef struct color_rgb *Color_rgb;
 
 /*
  * Flags to testcap() and set_colour_attribute (which currently only
@@ -2937,17 +3012,18 @@ enum {
     SORTIT_ANYOLDHOW = 0,	/* Defaults */
     SORTIT_IGNORING_CASE = 1,
     SORTIT_NUMERICALLY = 2,
-    SORTIT_BACKWARDS = 4,
+    SORTIT_NUMERICALLY_SIGNED = 4,
+    SORTIT_BACKWARDS = 8,
     /*
      * Ignore backslashes that quote another character---which may
      * be another backslash; the second backslash is active.
      */
-    SORTIT_IGNORING_BACKSLASHES = 8,
+    SORTIT_IGNORING_BACKSLASHES = 16,
     /*
      * Ignored by strmetasort(); used by paramsubst() to indicate
      * there is some sorting to do.
      */
-    SORTIT_SOMEHOW = 16,
+    SORTIT_SOMEHOW = 32,
 };
 
 /*
@@ -2965,7 +3041,7 @@ struct sortelt {
     int origlen;
     /*
      * The length of the string, if needed, else -1.
-     * The length is only needed if there are embededded nulls.
+     * The length is only needed if there are embedded nulls.
      */
     int len;
 };
@@ -3188,17 +3264,27 @@ enum {
 /* Hooks in core.                      */
 /***************************************/
 
+/* The type of zexit()'s second parameter, which see. */
+enum zexit_t {
+    /* This isn't a bitfield. The values are here just for explicitness. */
+    ZEXIT_NORMAL = 0,
+    ZEXIT_SIGNAL = 1,
+    ZEXIT_DEFERRED = 2
+};
+
 #define EXITHOOK       (zshhooks + 0)
 #define BEFORETRAPHOOK (zshhooks + 1)
 #define AFTERTRAPHOOK  (zshhooks + 2)
+#define GETCOLORATTR   (zshhooks + 3)
 
-#ifdef MULTIBYTE_SUPPORT
-/* Final argument to mb_niceformat() */
+/* Final argument to [ms]b_niceformat() */
 enum {
     NICEFLAG_HEAP = 1,		/* Heap allocation where needed */
     NICEFLAG_QUOTE = 2,		/* Result will appear in $'...' */
     NICEFLAG_NODUP = 4,         /* Leave allocated */
 };
+
+#ifdef MULTIBYTE_SUPPORT
 
 /* Metafied input */
 #define nicezputs(str, outs)	(void)mb_niceformat((str), (outs), NULL, 0)

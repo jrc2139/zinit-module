@@ -26,7 +26,7 @@
 
 subdir = .
 dir_top = .
-SUBDIRS = Src
+SUBDIRS = Doc Etc Src Test
 
 @VERSION_MK@
 
@@ -42,11 +42,85 @@ INSTALL         = @INSTALL@
 
 # default target
 all: config.h config.modules
-	cd Src && $(MAKE) $(MAKEDEFS) $@
+	@for subdir in Src; do \
+	  (cd $$subdir && $(MAKE) $(MAKEDEFS) $@) || exit 1; \
+	done
+	@cd Src/zdharma_continuum && \
+	  if [ -f zinit.bundle ] && [ ! -e zinit.so ]; then ln -sf zinit.bundle zinit.so; fi; \
+	  if [ -f zinit.so ] && [ ! -e zinit.bundle ]; then ln -sf zinit.so zinit.bundle; fi
 
 # prepare module configuration
 prep:
 	@cd Src && $(MAKE) $(MAKEDEFS) $@
+
+META-FAQ: FORCE
+	@cd Doc && $(MAKE) $(MAKEDEFS) ../META-FAQ
+
+dvi ps html info pdf:
+	@cd Doc && $(MAKE) $(MAKEDEFS) $@
+
+# ========== DEPENDENCIES FOR INSTALLING ==========
+
+# install stripped
+install-strip:
+	$(MAKE) install STRIPFLAGS="-s"
+
+# install/uninstall most things
+install: install.bin install.modules install.fns install.man install.runhelp
+uninstall: uninstall.bin uninstall.modules uninstall.fns uninstall.man uninstall.runhelp
+
+# install/uninstall just the binary
+install.bin uninstall.bin:
+	@cd Src && $(MAKE) $(MAKEDEFS) $@
+
+# install/uninstall just the modules
+install.modules uninstall.modules:
+	@cd Src && $(MAKE) $(MAKEDEFS) $@
+
+# install/uninstall just the man pages
+install.man uninstall.man:
+	@cd Doc && $(MAKE) $(MAKEDEFS) $@
+
+# install/uninstall just the runhelp files
+install.runhelp uninstall.runhelp:
+	@cd Doc && $(MAKE) $(MAKEDEFS) $@
+
+# install/uninstall just the shell functions
+install.fns:
+	if test x$(fndir) != x && test x$(fndir) != xno; then \
+	  test x$(sitefndir) != xno && \
+	    $(SHELL) $(sdir_top)/mkinstalldirs $(DESTDIR)$(sitefndir); \
+	  sdir_top="$(sdir_top)" fndir="$(fndir)" dir_top="$(dir_top)" \
+	  scriptdir="$(scriptdir)" runhelpdir="$(runhelpdir)" \
+	  FUNCTIONS_SUBDIRS="$(FUNCTIONS_SUBDIRS)" \
+	  INSTALL_DATA="$(INSTALL_DATA)" \
+	  INSTALL_PROGRAM="$(INSTALL_PROGRAM)" \
+	  DESTDIR="$(DESTDIR)" VERSION="$(VERSION)" \
+	  $(SHELL) $(sdir_top)/Config/installfns.sh || exit 1; \
+	fi; \
+	exit 0
+
+uninstall.fns:
+	if test x$(fndir) != x && test x$(fndir) != xno; then \
+	  fndir="$(fndir)" dir_top="$(dir_top)" \
+	  scriptdir="$(scriptdir)" \
+	  FUNCTIONS_SUBDIRS="$(FUNCTIONS_SUBDIRS)" \
+	  DESTDIR="$(DESTDIR)" VERSION="$(VERSION)" \
+	  $(SHELL) $(sdir_top)/Config/uninstallfns.sh || exit 1; \
+	fi; \
+	exit 0
+
+# install/uninstall just the info pages
+install.info uninstall.info:
+	@cd Doc && $(MAKE) $(MAKEDEFS) $@
+
+# install/uninstall just the HTML manual
+install.html uninstall.html:
+	@cd Doc && $(MAKE) $(MAKEDEFS) $@
+
+# ========== DEPENDENCIES FOR TESTING ==========
+check test:
+	cd Test ; $(MAKE) check
 
 # ========== DEPENDENCIES FOR CLEANUP ==========
 
@@ -83,5 +157,24 @@ $(sdir)/config.h.in: $(sdir)/stamp-h.in
 $(sdir)/stamp-h.in: $(sdir)/configure
 	cd $(sdir) && autoheader
 	echo > $(sdir)/stamp-h.in
+
+# ========== DEPENDENCIES FOR DISTRIBUTION ==========
+
+DISTNAME = zsh-$(VERSION)
+
+tarxz-src: $(DISTNAME).tar.xz
+$(DISTNAME).tar.xz: FORCE
+	@$(sdir_top)/Util/mkdisttree.sh $(DISTNAME) $(sdir_top) $(dir_top) SRC \
+	    $(MAKE) $(MAKEDEFS)
+	echo '#define ZSH_PATCHLEVEL "'`cd $(sdir_top) && git describe --tags --long --abbrev=7`'"' >$(DISTNAME)/Src/patchlevel.h.release
+	tar cf - $(DISTNAME) | xz -9 > $@
+	rm -rf $(DISTNAME)
+
+tarxz-doc: $(DISTNAME)-doc.tar.xz
+$(DISTNAME)-doc.tar.xz: FORCE
+	@$(sdir_top)/Util/mkdisttree.sh $(DISTNAME) $(sdir_top) $(dir_top) DOC \
+	    $(MAKE) $(MAKEDEFS)
+	tar cf - $(DISTNAME) | xz -9 > $@
+	rm -rf $(DISTNAME)
 
 FORCE:

@@ -270,7 +270,7 @@ zshlex(void)
     do {
 	if (inrepeat_)
 	    ++inrepeat_;
-	if (inrepeat_ == 3 && isset(SHORTLOOPS))
+	if (inrepeat_ == 3 && (isset(SHORTLOOPS) || isset(SHORTREPEAT)))
 	    incmdpos = 1;
 	tok = gettok();
     } while (tok != ENDINPUT && exalias());
@@ -540,6 +540,17 @@ static int
 cmd_or_math_sub(void)
 {
     int c = hgetc(), ret;
+
+    if (c == '\\') {
+	c = hgetc();
+	if (c != '\n') {
+	    hungetc(c);
+	    hungetc('\\');
+	    lexstop = 0;
+	    return skipcomm() ? CMD_OR_MATH_ERR : CMD_OR_MATH_CMD;
+	}
+	c = hgetc();
+    }
 
     if (c == '(') {
 	int lexpos = (int)(lexbuf.ptr - tokstr);
@@ -998,6 +1009,16 @@ gettokstr(int c, int sub)
 	    break;
 	case LX2_STRING:
 	    e = hgetc();
+	    if (e == '\\') {
+		e = hgetc();
+		if (e != '\n') {
+		    hungetc(e);
+		    hungetc('\\');
+		    lexstop = 0;
+		    break;
+		}
+		e = hgetc();
+	    }
 	    if (e == '[') {
 		cmdpush(CS_MATHSUBST);
 		add(String);
@@ -1613,6 +1634,7 @@ parsestr(char **s)
 		zerr("parse error near `%c'", err);
 	    else
 		zerr("parse error");
+	    tok = LEXERR;
 	}
     }
     return err;
@@ -1626,7 +1648,7 @@ parsestrnoerr(char **s)
 
     zcontext_save();
     untokenize(*s);
-    inpush(dupstring(*s), 0, NULL);
+    inpush(dupstring_wlen(*s, l), 0, NULL);
     strinbeg(0);
     lexbuf.len = 0;
     lexbuf.ptr = tokstr = *s;
@@ -1658,7 +1680,7 @@ parse_subscript(char *s, int sub, int endchar)
     if (!*s || *s == endchar)
 	return 0;
     zcontext_save();
-    untokenize(t = dupstring(s));
+    untokenize(t = dupstring_wlen(s, l));
     inpush(t, 0, NULL);
     strinbeg(0);
     /*
@@ -1674,7 +1696,7 @@ parse_subscript(char *s, int sub, int endchar)
      * length preservation.
      */
     lexbuf.len = 0;
-    lexbuf.ptr = tokstr = dupstring(s);
+    lexbuf.ptr = tokstr = dupstring_wlen(s, l);
     lexbuf.siz = l + 1;
     err = dquote_parse(endchar, sub);
     toklen = (int)(lexbuf.ptr - tokstr);
@@ -1713,7 +1735,7 @@ parse_subst_string(char *s)
 	return 0;
     zcontext_save();
     untokenize(s);
-    inpush(dupstring(s), 0, NULL);
+    inpush(dupstring_wlen(s, l), 0, NULL);
     strinbeg(0);
     lexbuf.len = 0;
     lexbuf.ptr = tokstr = s;
@@ -1867,6 +1889,7 @@ exalias(void)
     hwend();
     if (interact && isset(SHINSTDIN) && !strin && incasepat <= 0 &&
 	tok == STRING && !nocorrect && !(inbufflags & INP_ALIAS) &&
+	!hist_is_in_word()  &&
 	(isset(CORRECTALL) || (isset(CORRECT) && incmdpos)))
 	spckword(&tokstr, 1, incmdpos, 1);
 
@@ -2108,7 +2131,7 @@ skipcomm(void)
 	hist_in_word(1);
     } else {
 	/*
-	 * Set up for nested command subsitution, however
+	 * Set up for nested command substitution, however
 	 * we don't actually need the string until we get
 	 * back to the top level and recover the lot.
 	 * The $() body just appears empty.

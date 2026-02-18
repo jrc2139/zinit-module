@@ -426,7 +426,7 @@ if $first_stage; then
 	done | sed 's,^\(.*\)@%@\(.*\)@%@\(.*\)/\([^/]*\)$,\1\3\2\4,'
 	if test -n "$other_mdhs"; then
 	    echo "${other_mdhs}:" | sed 's,^ ,,'
-	    echo "	false # A. should only happen with make -n"
+	    echo "	false # should only happen with make -n"
 	    echo
 	fi
 	for export in $remote_exports; do
@@ -436,7 +436,7 @@ if $first_stage; then
 	done | sed 's,^\(.*\)@%@\(.*\)@%@\(.*\)/\([^/]*\)$,\1\3\2\4,'
 	if test -n "$other_exports"; then
 	    echo "${other_exports}:" | sed 's,^ ,,'
-	    echo "	false # B. should only happen with make -n"
+	    echo "	false # should only happen with make -n"
 	    echo
 	fi
 	for mdll in $remote_modules; do
@@ -446,7 +446,7 @@ if $first_stage; then
 	done | sed 's,^\(.*\)@%@\(.*\)@%@\(.*\)/\([^/]*\)$,\1\3\2\4,'
 	if test -n "$other_modules"; then
 	    echo "${other_modules}:" | sed 's,^ ,,'
-	    echo "	false # C. should only happen with make -n"
+	    echo "	false # should only happen with make -n"
 	    echo
 	fi
     fi
